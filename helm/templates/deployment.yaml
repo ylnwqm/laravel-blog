@@ -1,0 +1,290 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/redis:6.0
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/mysql:{{ .Values.mysql.version }}-{{ .Values.env }}
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: {{ .Values.mysql.password }}
+            - name: MYSQL_DATABASE
+              value: laravel_bjyblog
+          volumeMounts:
+            - mountPath: /var/lib/mysql
+              name: mysql-pvc
+      volumes:
+        - name: mysql-pvc
+          persistentVolumeClaim:
+            claimName: mysql-pvc
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: php
+  template:
+    metadata:
+      labels:
+        app: php
+    spec:
+      containers:
+        - name: php
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/php:7.4-{{ .Values.env }}
+          volumeMounts:
+            - mountPath: /app
+              name: code-pvc
+      volumes:
+        - name: code-pvc
+          persistentVolumeClaim:
+            claimName: code-pvc
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configMap.yaml") . | sha256sum }}
+    spec:
+      volumes:
+        - name: code-pvc
+          persistentVolumeClaim:
+            claimName: code-pvc
+        - name: config
+          configMap:
+            name: nginx-config
+            items:
+              - key: config
+                path: laravel-bjyblog.conf
+      containers:
+        - name: nginx
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/nginx:1.19
+          env:
+            - name: TZ
+              value: {{ .Values.timezone }}
+          volumeMounts:
+            - name: code-pvc
+              mountPath: /app
+            - name: config
+              mountPath: /etc/nginx/conf.d
+
+{{- if .Values.monitor.enabled }}
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configMap.yaml") . | sha256sum }}
+    spec:
+      volumes:
+        - name: prometheus-pvc
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+        - name: prometheus-config
+          emptyDir: {}
+      initContainers:
+        - name: busybox
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/busybox:1.32
+          command: ['sh', '-c', "echo \"${PROMETHEUS_CONFIG/node_internal_ip/$NODE_INTERNAL_IP}\" >> /prometheus/prometheus.yml"]
+          env:
+            - name: NODE_INTERNAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: PROMETHEUS_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: prometheus-config
+                  key: config
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /prometheus
+      containers:
+        - name: prometheus
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/prometheus:v2.23.0
+          volumeMounts:
+            - name: prometheus-pvc
+              mountPath: /prometheus
+            - name: prometheus-config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configMap.yaml") . | sha256sum }}
+    spec:
+      volumes:
+        - name: grafana-pvc
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+        - name: config
+          configMap:
+            name: grafana-config
+            items:
+              - key: config
+                path: custom.ini
+      containers:
+        - name: grafana
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/grafana:7.3.4
+          volumeMounts:
+            - name: grafana-pvc
+              mountPath: /var/lib/grafana
+            - name: config
+              mountPath: /usr/share/grafana/conf/custom.ini
+              subPath: custom.ini
+          env:
+            - name: GF_SERVER_DOMAIN
+              value: {{ .Values.host }}
+            - name: GF_SERVER_ROOT_URL
+              value: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
+{{- end }}
+
+{{- if .Values.elasticsearch.enabled }}
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      volumes:
+        - name: elasticsearch-pvc
+          persistentVolumeClaim:
+            claimName: elasticsearch-pvc
+      containers:
+        - name: elasticsearch
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/elasticsearch:7.10.1
+          env:
+            - name: ES_JAVA_OPTS
+              value: -Xms512m -Xmx512m
+            - name: discovery.type
+              value: single-node
+          volumeMounts:
+            - name: elasticsearch-pvc
+              mountPath: /usr/share/elasticsearch/data
+{{- end }}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana-deployment
+  namespace: blog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configMap.yaml") . | sha256sum }}
+    spec:
+      volumes:
+        - name: config
+          configMap:
+            name: kibana-config
+            items:
+              - key: config
+                path: kibana.yml
+      containers:
+        - name: kibana
+          image: {{ if eq .Values.container_registry "Aliyun" }}registry.cn-beijing.aliyuncs.com/{{ end }}baijunyao/kibana:7.10.1
+          volumeMounts:
+            - name: config
+              mountPath: /usr/share/kibana/config/kibana.yml
+              subPath: kibana.yml
+
